@@ -3,6 +3,9 @@
 Monitors ALL SoundCloud playlists for the authenticated user, searches
 Soulseek for FLAC versions of new tracks (falling back to 320kbps MP3),
 downloads them, tags metadata, and creates matching Serato smart crates.
+
+When multiple versions of a track exist on Soulseek (e.g. Remix vs Original
+Mix), we download one per version group so the user can keep the right one.
 """
 
 import asyncio
@@ -15,8 +18,8 @@ from .config import (
     SOUNDCLOUD_POLL_INTERVAL,
     SOUNDCLOUD_USER_URL,
 )
-from .match import filter_and_rank_candidates
-from .metadata import tag_file, verify_metadata, enrich_metadata
+from .match import filter_and_rank_candidates, extract_versions
+from .metadata import tag_file, enrich_metadata
 from .notify import send_notification
 from .serato_crate import ensure_smart_crate
 from .soundcloud import (
@@ -31,29 +34,38 @@ from .state import StateManager
 logger = logging.getLogger("streamflacr")
 
 
+def _version_label(filename: str) -> str:
+    """Build a short version label from the filename for the notification."""
+    versions = extract_versions(filename)
+    if not versions:
+        return ""
+    # Capitalize and join
+    tags = sorted(v.title() for v in versions)
+    return " (" + ", ".join(tags) + ")"
+
+
 async def process_new_track(
     track: TrackInfo,
     playlist_name: str,
     slsk: SoulseekDownloader,
     state: StateManager,
     playlist_url: str,
-) -> Path | None:
-    """Search, match, download, tag, and integrate a single track.
+) -> list[Path]:
+    """Search, match, download, tag, and integrate a track.
 
-    Priority: FLAC > 320kbps MP3. Alerts the user if nothing is found.
+    Downloads one file per distinct version group (e.g. Remix, Original Mix).
+    Returns list of successfully downloaded paths.
     """
     logger.info("Processing: %s - %s", track.artist, track.title)
 
-    # Search Soulseek
     raw_candidates = await slsk.search_track(track.artist, track.title, timeout=SEARCH_TIMEOUT)
 
     if not raw_candidates:
         msg = f"No FLAC or 320kbps MP3 found: {track.artist} - {track.title}"
         logger.warning(msg)
         send_notification("StreamFLACr: Not Found", msg)
-        return None
+        return []
 
-    # Score and filter candidates against the SoundCloud track
     candidates = filter_and_rank_candidates(
         sc_artist=track.canonical_artist or track.artist,
         sc_title=track.title,
@@ -65,20 +77,34 @@ async def process_new_track(
         msg = f"No matching result on Soulseek: {track.artist} - {track.title}"
         logger.warning(msg)
         send_notification("StreamFLACr: No Match", msg)
-        return None
+        return []
 
-    top = candidates[0]
-    fmt = "FLAC" if top["tier"] == 0 else f"{top['bitrate']}kbps MP3"
-    logger.info(
-        "Best match (score %.2f): %s (%s) from %s",
-        top["match_score"], top["filename"], fmt, top["username"],
-    )
+    # Download candidates, stopping once we have one per version group
+    downloaded: list[Path] = []
+    downloaded_versions: set[frozenset[str]] = set()
+    max_downloads = 5  # safety cap per track
 
-    # Try up to 3 matched candidates
-    for candidate in candidates[:3]:
+    for candidate in candidates:
+        if len(downloaded) >= max_downloads:
+            break
+
+        versions = extract_versions(candidate["filename"])
+        version_key = versions if versions else frozenset({"_no_version"})
+
+        # Skip if we already have this version
+        if version_key in downloaded_versions:
+            continue
+
+        fmt = "FLAC" if candidate["tier"] == 0 else f"{candidate['bitrate']}kbps MP3"
+        ver_label = _version_label(candidate["filename"])
+        logger.info(
+            "Trying (score %.2f, %s%s): %s from %s",
+            candidate["match_score"], fmt, ver_label,
+            candidate["filename"], candidate["username"],
+        )
+
         local_path = await slsk.download(candidate["username"], candidate["remote_path"])
         if local_path and local_path.exists():
-            # Verify and enrich metadata from the downloaded file
             tag_file(
                 filepath=local_path,
                 artist=track.canonical_artist or track.artist,
@@ -87,8 +113,6 @@ async def process_new_track(
                 album=track.album,
                 genre=track.genre,
             )
-
-            # Cross-check: verify the file's existing metadata and fill gaps
             enrich_metadata(
                 filepath=local_path,
                 sc_track=track,
@@ -102,15 +126,32 @@ async def process_new_track(
                 title=track.title,
                 local_path=str(local_path),
             )
-            is_flac = local_path.suffix.lower() == ".flac"
-            quality = "FLAC" if is_flac else "320kbps MP3"
-            send_notification("StreamFLACr", f"Downloaded ({quality}): {track.artist} - {track.title}")
-            return local_path
 
-    msg = f"All download attempts failed: {track.artist} - {track.title}"
-    logger.error(msg)
-    send_notification("StreamFLACr: Download Failed", msg)
-    return None
+            downloaded_versions.add(version_key)
+            downloaded.append(local_path)
+
+            quality = "FLAC" if local_path.suffix.lower() == ".flac" else "320kbps MP3"
+            send_notification(
+                "StreamFLACr",
+                f"Downloaded ({quality}{ver_label}): {track.artist} - {track.title}",
+            )
+        # If download failed, continue to next candidate (same or different version)
+
+    if not downloaded:
+        msg = f"All download attempts failed: {track.artist} - {track.title}"
+        logger.error(msg)
+        send_notification("StreamFLACr: Download Failed", msg)
+    elif len(downloaded) > 1:
+        logger.info(
+            "Downloaded %d versions for '%s - %s' (user can delete duplicates)",
+            len(downloaded), track.artist, track.title,
+        )
+        send_notification(
+            "StreamFLACr",
+            f"{len(downloaded)} versions downloaded: {track.artist} - {track.title}",
+        )
+
+    return downloaded
 
 
 async def sync_playlist(
