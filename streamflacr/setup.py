@@ -145,7 +145,7 @@ SOUNDCLOUD_POLL_INTERVAL={poll_interval}
 # Download directory (Serato Auto Import watches this folder)
 DOWNLOAD_DIR={DOWNLOAD_DIR}
 
-# Serato database directory
+# Staging directory (files are tagged here before importing)
 STAGING_DIR={STAGING_DIR}
 SERATO_DIR={SERATO_DIR}
 

@@ -4,8 +4,9 @@ Monitors ALL SoundCloud playlists for the authenticated user, searches
 Soulseek for FLAC versions of new tracks (falling back to 320kbps MP3),
 downloads them, tags metadata, and creates matching Serato smart crates.
 
-When multiple versions of a track exist on Soulseek (e.g. Remix vs Original
-Mix), we download one per version group so the user can keep the right one.
+When Serato DJ is running, downloaded files are held in staging until
+Serato exits — Serato only scans Auto Import on startup, so importing
+while Serato is active would be invisible until restart.
 """
 
 import asyncio
@@ -17,11 +18,13 @@ from .config import (
     STAGING_DIR,
     SEARCH_TIMEOUT,
     SOUNDCLOUD_POLL_INTERVAL,
+    SERATO_CHECK_INTERVAL,
 )
 from .match import filter_and_rank_candidates, extract_versions
 from .metadata import tag_file, enrich_metadata
 from .notify import send_notification
 from .serato_crate import ensure_smart_crate
+from .serato_watch import is_serato_running, flush_staging_to_import
 from .soundcloud import (
     PlaylistInfo,
     TrackInfo,
@@ -39,7 +42,6 @@ def _version_label(filename: str) -> str:
     versions = extract_versions(filename)
     if not versions:
         return ""
-    # Capitalize and join
     tags = sorted(v.title() for v in versions)
     return " (" + ", ".join(tags) + ")"
 
@@ -50,11 +52,14 @@ async def process_new_track(
     slsk: SoulseekDownloader,
     state: StateManager,
     playlist_url: str,
+    serato_active: bool,
 ) -> list[Path]:
     """Search, match, download, tag, and integrate a track.
 
-    Downloads one file per distinct version group (e.g. Remix, Original Mix).
-    Returns list of successfully downloaded paths.
+    If Serato is running, files stay in staging and are moved to
+    Auto Import only after Serato exits.
+
+    Returns list of successfully downloaded paths (in staging or final).
     """
     # Use canonical_artist (publisher_metadata.artist) for search and display
     # since track.artist is the SoundCloud profile handle (e.g. "heisrema")
@@ -126,28 +131,42 @@ async def process_new_track(
                 playlist_name=playlist_name,
             )
 
-            # Atomically move to Serato Auto Import so Serato sees
-            # a fully-tagged file, not a half-written one
-            final_path = DOWNLOAD_DIR / local_path.name
-            local_path.replace(final_path)
-            local_path = final_path
+            if serato_active:
+                # Serato is running — keep in staging, don't move to Auto Import yet.
+                # The daemon will flush staging after Serato exits.
+                logger.info(
+                    "Serato is running; holding %s in staging until Serato exits",
+                    local_path.name,
+                )
+                final_path = local_path  # stays in staging
+            else:
+                # Serato not running — move to Auto Import now (atomic replace)
+                final_path = DOWNLOAD_DIR / local_path.name
+                local_path.replace(final_path)
 
             state.mark_downloaded(
                 playlist_url=playlist_url,
                 track_id=track.track_id,
                 artist=display_artist,
                 title=track.title,
-                local_path=str(local_path),
+                local_path=str(final_path),
             )
 
             downloaded_versions.add(version_key)
-            downloaded.append(local_path)
+            downloaded.append(final_path)
 
-            quality = "FLAC" if local_path.suffix.lower() == ".flac" else "320kbps MP3"
-            send_notification(
-                "StreamFLACr",
-                f"Downloaded ({quality}{ver_label}): {display_artist} - {track.title}",
-            )
+            quality = "FLAC" if final_path.suffix.lower() == ".flac" else "320kbps MP3"
+            if serato_active:
+                send_notification(
+                    "StreamFLACr",
+                    f"Downloaded ({quality}{ver_label}): {display_artist} - {track.title}"
+                    f" (will import when Serato closes)",
+                )
+            else:
+                send_notification(
+                    "StreamFLACr",
+                    f"Downloaded ({quality}{ver_label}): {display_artist} - {track.title}",
+                )
         # If download failed, continue to next candidate (same or different version)
 
     if not downloaded:
@@ -171,6 +190,7 @@ async def sync_playlist(
     playlist: PlaylistInfo,
     slsk: SoulseekDownloader,
     state: StateManager,
+    serato_active: bool,
 ) -> None:
     playlist_url = playlist.url
     playlist_name = playlist.title
@@ -199,7 +219,7 @@ async def sync_playlist(
     async def _process_with_semaphore(t: TrackInfo) -> None:
         async with semaphore:
             try:
-                await process_new_track(t, playlist_name, slsk, state, playlist_url)
+                await process_new_track(t, playlist_name, slsk, state, playlist_url, serato_active)
             except Exception as e:
                 logger.error("Error processing track %s: %s", t.title, e)
 
@@ -208,6 +228,51 @@ async def sync_playlist(
 
     state.mark_seen(playlist_url, list(new_ids))
     state.save()
+
+
+async def _flush_staging_loop(slsk: SoulseekDownloader) -> None:
+    """Background task that checks if Serato has exited and flushes staging files.
+
+    While Serato is running, downloaded files stay in the staging directory.
+    Once Serato exits, we move them all to Auto Import so Serato picks them
+    up on next launch.
+    """
+    serato_was_running = False
+    notified_pending = False
+
+    while True:
+        serato_active = is_serato_running()
+
+        if serato_active and not serato_was_running:
+            logger.info("Serato DJ detected as running — files will be held in staging")
+            serato_was_running = True
+            notified_pending = False
+
+        elif not serato_active and serato_was_running:
+            # Serato just exited — flush all staging files to Auto Import
+            logger.info("Serato DJ exited — flushing staging files to Auto Import")
+            moved = flush_staging_to_import(STAGING_DIR, DOWNLOAD_DIR)
+            if moved:
+                logger.info("Moved %d file(s) to Auto Import", len(moved))
+                send_notification(
+                    "StreamFLACr",
+                    f"Imported {len(moved)} track(s) to Serato",
+                )
+            serato_was_running = False
+            notified_pending = False
+
+        # Notify once per Serato session if there are pending files
+        if serato_active and not notified_pending:
+            pending = list(STAGING_DIR.glob("*.flac")) + list(STAGING_DIR.glob("*.mp3"))
+            if pending:
+                logger.info("%d file(s) waiting in staging for Serato to close", len(pending))
+                send_notification(
+                    "StreamFLACr",
+                    f"{len(pending)} track(s) ready — close Serato DJ to import them",
+                )
+                notified_pending = True
+
+        await asyncio.sleep(SERATO_CHECK_INTERVAL)
 
 
 async def poll_loop(slsk: SoulseekDownloader, state: StateManager) -> None:
@@ -230,39 +295,59 @@ async def poll_loop(slsk: SoulseekDownloader, state: StateManager) -> None:
     )
     send_notification("StreamFLACr", f"Watching {len(existing_playlists)} playlists")
 
+    # Flush any files left in staging from a previous run (Serato may not be running now)
+    if not is_serato_running():
+        moved = flush_staging_to_import(STAGING_DIR, DOWNLOAD_DIR)
+        if moved:
+            logger.info("Flushed %d staged file(s) to Auto Import on startup", len(moved))
+
     known_playlist_urls = {p.url for p in existing_playlists}
 
-    while True:
-        await asyncio.sleep(SOUNDCLOUD_POLL_INTERVAL)
+    # Start background task to watch for Serato exit and flush staging
+    flush_task = asyncio.create_task(_flush_staging_loop(slsk))
 
-        try:
-            current_playlists = await asyncio.to_thread(discover_user_playlists)
-        except Exception as e:
-            logger.error("Error discovering playlists: %s", e)
-            continue
+    try:
+        while True:
+            await asyncio.sleep(SOUNDCLOUD_POLL_INTERVAL)
 
-        for playlist in current_playlists:
-            if playlist.url not in known_playlist_urls:
-                logger.info("New playlist detected: '%s'", playlist.title)
-                state.set_playlist_name(playlist.url, playlist.title)
-                ensure_smart_crate(playlist.title)
-                known_playlist_urls.add(playlist.url)
-
-        for playlist in current_playlists:
             try:
-                await sync_playlist(playlist, slsk, state)
+                current_playlists = await asyncio.to_thread(discover_user_playlists)
             except Exception as e:
-                logger.error("Error syncing playlist '%s': %s", playlist.title, e)
+                logger.error("Error discovering playlists: %s", e)
+                continue
+
+            for playlist in current_playlists:
+                if playlist.url not in known_playlist_urls:
+                    logger.info("New playlist detected: '%s'", playlist.title)
+                    state.set_playlist_name(playlist.url, playlist.title)
+                    ensure_smart_crate(playlist.title)
+                    known_playlist_urls.add(playlist.url)
+
+            serato_active = is_serato_running()
+            for playlist in current_playlists:
+                try:
+                    await sync_playlist(playlist, slsk, state, serato_active)
+                except Exception as e:
+                    logger.error("Error syncing playlist '%s': %s", playlist.title, e)
+    finally:
+        flush_task.cancel()
 
 
 async def run_once(slsk: SoulseekDownloader, state: StateManager) -> None:
     playlists = await asyncio.to_thread(discover_user_playlists)
 
+    serato_active = is_serato_running()
     for playlist in playlists:
         try:
-            await sync_playlist(playlist, slsk, state)
+            await sync_playlist(playlist, slsk, state, serato_active)
         except Exception as e:
             logger.error("Error syncing playlist '%s': %s", playlist.title, e)
+
+    # Flush staging if Serato is not running
+    if not serato_active:
+        moved = flush_staging_to_import(STAGING_DIR, DOWNLOAD_DIR)
+        if moved:
+            logger.info("Flushed %d staged file(s) to Auto Import", len(moved))
 
 
 async def amain(daemon: bool = False) -> None:
