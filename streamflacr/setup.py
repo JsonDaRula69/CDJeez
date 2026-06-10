@@ -287,7 +287,7 @@ def run_setup() -> None:
     if slsk_installed:
         print("  ✓ SoulseekQt.app found")
     else:
-        print("  ✗ SoulseekQt.app not found")
+        print("  ✗ SoulseekQt.app not found in Applications folder")
         print("  SoulseekQt is recommended but not required (the built-in client works too).")
         answer = input("  Install SoulseekQt? [y/N]: ").strip().lower()
         if answer == "y":

@@ -1,9 +1,11 @@
 """SoundCloud playlist discovery and monitoring.
 
-Uses yt-dlp with Chrome cookies to discover all user playlists (including
-private ones), and the SoundCloud API v2 with decrypted Chrome cookies
-to resolve playlist tracks and extract rich metadata (duration, genre,
-publisher info).
+Uses the SoundCloud API v2 with OAuth (from Chrome cookies) as the primary
+path for both playlist discovery and track metadata. Falls back to yt-dlp
+with Chrome cookies when OAuth is unavailable.
+
+The API-only path never triggers DRM protection because we only read
+metadata — we don't stream or download audio.
 """
 
 import logging
@@ -45,7 +47,10 @@ class PlaylistInfo:
     tracks: list[TrackInfo] = field(default_factory=list)
 
 
+# ── Chrome cookie decryption ────────────────────────────────────────────
+
 def _get_client_id() -> str:
+    """Extract the SoundCloud client_id from the homepage JS."""
     global _cached_client_id
     if _cached_client_id:
         return _cached_client_id
@@ -61,6 +66,7 @@ def _get_client_id() -> str:
 
 
 def _decrypt_chrome_cookies() -> dict:
+    """Decrypt SoundCloud cookies from Chrome's SQLite database."""
     global _cached_cookies
     if _cached_cookies is not None:
         return _cached_cookies
@@ -137,9 +143,10 @@ def _decrypt_chrome_cookies() -> dict:
 
 
 def _get_oauth_token() -> str | None:
+    """Extract the OAuth token from Chrome cookies."""
     global _cached_oauth_token
     if _cached_oauth_token is not None:
-        return _cached_oauth_token
+        return _cached_oauth_token or None
     cookies = _decrypt_chrome_cookies()
     raw = cookies.get("oauth_token", "")
     if not raw:
@@ -150,36 +157,50 @@ def _get_oauth_token() -> str | None:
     return _cached_oauth_token or None
 
 
-def _api_session() -> requests.Session:
-    session = requests.Session()
-    cookies = _decrypt_chrome_cookies()
-    for name, val in cookies.items():
-        session.cookies.set(name, val, domain=".soundcloud.com")
-    token = _get_oauth_token()
-    if token:
-        session.headers["Authorization"] = f"OAuth {token}"
-    return session
+# ── API requests ─────────────────────────────────────────────────────────
 
+def _api_get_smart(endpoint: str, params: dict | None = None) -> dict | None:
+    """SoundCloud API v2 request with dual-attempt authentication.
 
-def _api_get(endpoint: str, params: dict | None = None) -> dict | None:
-    client_id = _get_client_id()
+    Sending client_id + authenticated session together causes 403 on some
+    endpoints. So we try authenticated (OAuth) first, then fall back to
+    public (client_id only).
+    """
     params = dict(params or {})
+    base_url = f"https://api-v2.soundcloud.com/{endpoint}"
+    token = _get_oauth_token()
+
+    # Attempt 1: OAuth header (no client_id, no cookies)
+    if token:
+        headers = {"Authorization": f"OAuth {token}"}
+        try:
+            resp = requests.get(base_url, headers=headers, params=params, timeout=15)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.debug("OAuth attempt on %s returned %d", endpoint, resp.status_code)
+        except requests.RequestException as e:
+            logger.debug("OAuth request failed on %s: %s", endpoint, e)
+
+    # Attempt 2: client_id (no auth, no cookies)
+    client_id = _get_client_id()
     params["client_id"] = client_id
-    session = _api_session()
     try:
-        resp = session.get(f"https://api-v2.soundcloud.com/{endpoint}", params=params, timeout=15)
+        resp = requests.get(base_url, params=params, timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
+        logger.debug("client_id attempt on %s returned %d", endpoint, resp.status_code)
     except requests.RequestException as e:
-        logger.debug("API request failed: %s", e)
-        return None
-    if resp.status_code == 200:
-        return resp.json()
-    logger.debug("SoundCloud API %s returned %d", endpoint, resp.status_code)
+        logger.debug("client_id request failed on %s: %s", endpoint, e)
+
     return None
 
 
-def _api_resolve(url: str) -> dict | None:
-    return _api_get("resolve", {"url": url})
+def _api_get(endpoint: str, params: dict | None = None) -> dict | None:
+    """Legacy single-attempt API request (kept for backward compat)."""
+    return _api_get_smart(endpoint, params)
 
+
+# ── Track / playlist data extraction ────────────────────────────────────
 
 def _track_from_api(track_data: dict) -> TrackInfo:
     """Build a TrackInfo from a SoundCloud API track object."""
@@ -210,24 +231,50 @@ def _track_from_api(track_data: dict) -> TrackInfo:
     )
 
 
-def discover_user_playlists(user_sets_url: str | None = None) -> list[PlaylistInfo]:
-    if not user_sets_url:
-        me = _api_get("me")
-        if me:
-            permalink = me.get("permalink_url", "")
-            if permalink:
-                user_sets_url = f"{permalink}/sets"
-        if not user_sets_url:
-            logger.error("Cannot determine SoundCloud user URL. Set SOUNDCLOUD_USER_URL in .env")
-            return []
+# ── Playlist discovery (API-first) ───────────────────────────────────────
 
-    logger.info("Discovering playlists from %s", user_sets_url)
-    playlists = _yt_dlp_discover_playlists(user_sets_url)
-    logger.info("Found %d playlists", len(playlists))
-    return playlists
+def _get_user_id() -> int | None:
+    """Get the authenticated user's SoundCloud ID via /me."""
+    data = _api_get_smart("me")
+    if data:
+        return data.get("id")
+    return None
 
 
-def _yt_dmp_opts() -> dict:
+def _api_discover_playlists(user_id: int) -> list[PlaylistInfo]:
+    """Discover playlists via /users/{id}/playlists (API v2)."""
+    data = _api_get_smart(f"users/{user_id}/playlists", {"limit": 50, "representation": "full"})
+    if not data:
+        return []
+
+    # Handle both list and paginated responses
+    playlists_raw: list[dict]
+    if isinstance(data, list):
+        playlists_raw = data
+    elif isinstance(data, dict):
+        playlists_raw = data.get("collection", data.get("playlists", []))
+    else:
+        return []
+
+    results: list[PlaylistInfo] = []
+    for p in playlists_raw:
+        if not isinstance(p, dict):
+            continue
+        pid = str(p.get("id", ""))
+        title = p.get("title", "?")
+        permalink = p.get("permalink_url", "")
+        if pid and permalink:
+            # Extract tracks inline if representation=full returned them
+            tracks: list[TrackInfo] = []
+            raw_tracks = p.get("tracks", [])
+            if isinstance(raw_tracks, list):
+                tracks = [_track_from_api(t) for t in raw_tracks if isinstance(t, dict)]
+            results.append(PlaylistInfo(playlist_id=pid, title=title, url=permalink, tracks=tracks))
+
+    return results
+
+
+def _yt_dlp_opts() -> dict:
     return {
         "quiet": True,
         "no_warnings": True,
@@ -237,8 +284,9 @@ def _yt_dmp_opts() -> dict:
 
 
 def _yt_dlp_discover_playlists(sets_url: str) -> list[PlaylistInfo]:
-    ydl_opts = {**_yt_dmp_opts(), "extract_flat": True}
-    results = []
+    """Fallback playlist discovery via yt-dlp (requires Chrome cookies)."""
+    ydl_opts = {**_yt_dlp_opts(), "extract_flat": True}
+    results: list[PlaylistInfo] = []
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             result = ydl.extract_info(sets_url, download=False)
@@ -261,58 +309,59 @@ def _yt_dlp_discover_playlists(sets_url: str) -> list[PlaylistInfo]:
     return results
 
 
+def discover_user_playlists(user_sets_url: str | None = None) -> list[PlaylistInfo]:
+    """Discover all playlists for the authenticated user.
+
+    Tries the API first (faster, no yt-dlp dependency), falls back to yt-dlp.
+    """
+    # API path: get user ID, then list playlists
+    user_id = _get_user_id()
+    if user_id:
+        playlists = _api_discover_playlists(user_id)
+        if playlists:
+            logger.info("API discovered %d playlists for user %d", len(playlists), user_id)
+            return playlists
+        logger.info("API returned no playlists, trying yt-dlp fallback")
+
+    # Fallback: yt-dlp discovery
+    if not user_sets_url:
+        logger.error("Cannot determine SoundCloud user URL. Set SOUNDCLOUD_USER_URL in .env")
+        return []
+
+    logger.info("Discovering playlists from %s via yt-dlp", user_sets_url)
+    playlists = _yt_dlp_discover_playlists(user_sets_url)
+    logger.info("Found %d playlists via yt-dlp", len(playlists))
+    return playlists
+
+
+# ── Playlist track fetching ──────────────────────────────────────────────
+
 def fetch_playlist_tracks(playlist_url: str) -> list[TrackInfo]:
-    """Fetch all tracks from a SoundCloud playlist with rich metadata."""
-    data = _api_resolve(playlist_url)
-    if data and "tracks" in data:
+    """Fetch all tracks from a SoundCloud playlist.
+
+    Uses the API directly — no yt-dlp needed for metadata.
+    """
+    data = _api_get_smart("resolve", {"url": playlist_url})
+    if data and isinstance(data.get("tracks"), list) and data["tracks"]:
         tracks = [_track_from_api(t) for t in data["tracks"]]
         logger.info("API returned %d tracks for playlist '%s'", len(tracks), data.get("title", ""))
         return tracks
 
-    logger.info("Falling back to yt-dlp for playlist: %s", playlist_url)
-    return _yt_dlp_playlist_tracks(playlist_url)
+    # If resolve didn't include full tracks, try the playlist ID directly
+    if data and data.get("id"):
+        pid = data["id"]
+        full = _api_get_smart(f"playlists/{pid}", {"representation": "full"})
+        if full and isinstance(full.get("tracks"), list) and full["tracks"]:
+            tracks = [_track_from_api(t) for t in full["tracks"]]
+            logger.info("Direct playlist API returned %d tracks for '%s'", len(tracks), full.get("title", ""))
+            return tracks
 
-
-def _yt_dlp_playlist_tracks(playlist_url: str) -> list[TrackInfo]:
-    ydl_opts = {**_yt_dmp_opts(), "extract_flat": True}
-    urls: list[str] = []
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        result = ydl.extract_info(playlist_url, download=False)
-        if result and "entries" in result:
-            for entry in result["entries"]:
-                if entry and entry.get("url"):
-                    urls.append(entry["url"])
-
-    tracks: list[TrackInfo] = []
-    for url in urls:
-        info = _yt_dlp_track_info(url)
-        if info:
-            tracks.append(info)
-    return tracks
-
-
-def _yt_dlp_track_info(track_url: str) -> TrackInfo | None:
-    ydl_opts = _yt_dmp_opts()
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            info = ydl.extract_info(track_url, download=False)
-        except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
-            logger.warning("yt-dlp could not extract: %s", track_url)
-            return None
-    if not info:
-        return None
-    duration_s = info.get("duration")
-    return TrackInfo(
-        track_id=str(info.get("id", "")),
-        title=info.get("track") or info.get("title", ""),
-        artist=info.get("uploader", ""),
-        url=track_url,
-        duration_s=duration_s,
-        genre=info.get("genre") or None,
-    )
+    logger.warning("Could not fetch tracks for playlist: %s", playlist_url)
+    return []
 
 
 def refresh_playlist_tracks(playlist: PlaylistInfo) -> PlaylistInfo:
+    """Re-fetch tracks for a playlist."""
     tracks = fetch_playlist_tracks(playlist.url)
     playlist.tracks = tracks
     return playlist
