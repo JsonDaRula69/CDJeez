@@ -27,7 +27,8 @@ def main() -> None:
 
     if args.command == "setup":
         if args.uninstall:
-            unregister_launchdaemon()
+            from .setup import full_uninstall
+            full_uninstall()
             return
         run_setup()
         return

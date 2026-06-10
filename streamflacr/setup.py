@@ -239,6 +239,7 @@ def register_launchdaemon() -> bool:
 
 
 def unregister_launchdaemon() -> bool:
+    """Stop and remove the LaunchDaemon. Does NOT touch Serato data."""
     kill_running_daemon()
     subprocess.run(
         ["launchctl", "unload", str(INSTALLED_PLIST)],
@@ -249,6 +250,30 @@ def unregister_launchdaemon() -> bool:
         print("  LaunchDaemon removed.")
         return True
     return False
+
+
+def full_uninstall() -> None:
+    """Remove all StreamFLACr artifacts except Serato data.
+
+    Serato crates and the _Serato_ directory are never modified during
+    uninstall — that data is too sensitive. Smart crates created by
+    StreamFLACr remain in place for the user to manage manually.
+    """
+    print("  Uninstalling StreamFLACr...")
+    kill_running_daemon()
+    unregister_launchdaemon()
+    if CONFIG_DIR.exists():
+        shutil.rmtree(CONFIG_DIR)
+        print("  Removed config directory.")
+    # Remove log files
+    for log in Path.home().glob("Library/Logs/streamflacr*"):
+        log.unlink()
+    print("  Cleaned up log files.")
+    print()
+    print("  Note: Serato smart crates were NOT removed.")
+    print("  To remove them manually, delete .scrate files from:")
+    print(f"    {SERATO_DIR / 'SmartCrates'}")
+    print("  (Backups are at /Users/djtchill/Music/_Serato_Backup_SFr/)")
 
 
 # ── Main wizard ────────────────────────────────────────────────────────
