@@ -28,25 +28,26 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    from . import __version__
+
     if args.version:
-        from . import __version__
         print(f"StreamFLACr v{__version__}")
         return
 
-    if args.command == "setup":
-        run_setup()
-        return
-
+    # Print version as the very first output so it appears right after install
     if args.command == "uninstall":
+        print(f"  StreamFLACr v{__version__}")
         from .setup import full_uninstall
         full_uninstall()
         return
 
+    if args.command != "setup":
+        print(f"StreamFLACr v{__version__}")
+
     from .config import is_configured
 
     if not is_configured():
-        from . import __version__
-        print(f"\n  Welcome to StreamFLACr v{__version__}! Let's get you set up.\n")
+        print(f"  Welcome to StreamFLACr v{__version__}! Let's get you set up.")
         run_setup()
         # Reload config module so module-level vars pick up the new .env
         import importlib
