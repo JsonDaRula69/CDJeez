@@ -236,10 +236,45 @@ def _track_from_api(track_data: dict) -> TrackInfo | None:
 # ── Playlist discovery ──────────────────────────────────────────────────
 
 def _get_user_id() -> int | None:
-    """Get the authenticated user's SoundCloud ID via /me."""
+    """Get the authenticated user's SoundCloud ID via /me.
+
+    If the initial attempt fails (OAuth token may be stale or Chrome not running),
+    launches Chrome in the background and retries up to 3 times with 60s gaps.
+    After all retries fail, sends a macOS notification telling the user to sign in.
+    """
     data = _api_get("me")
     if data:
         return data.get("id")
+
+    # OAuth failed — try launching Chrome in background and retrying
+    import subprocess
+    import time
+
+    logger.info("OAuth auth failed; launching Chrome to refresh session")
+    subprocess.run(["open", "-gja", "Google Chrome"], capture_output=True, check=False)
+
+    for attempt in range(1, 4):
+        wait = 60
+        logger.info("OAuth retry %d/3 in %ds (waiting for Chrome session)...", attempt, wait)
+        time.sleep(wait)
+
+        # Clear cached OAuth token so we re-read cookies
+        global _cached_oauth_token, _cached_cookies
+        _cached_oauth_token = None
+        _cached_cookies = None
+
+        data = _api_get("me")
+        if data:
+            logger.info("OAuth succeeded on retry %d", attempt)
+            return data.get("id")
+
+    # All retries exhausted — notify the user
+    from .notify import send_notification
+    send_notification(
+        "StreamFLACr: SoundCloud Auth Failed",
+        "Could not connect to SoundCloud. Please make sure you're signed into SoundCloud in Chrome.",
+    )
+    logger.error("Could not identify SoundCloud user after 3 retries with Chrome launch")
     return None
 
 
@@ -247,7 +282,6 @@ def discover_user_playlists(user_sets_url: str | None = None) -> list[PlaylistIn
     """Discover all playlists for the authenticated user via API v2."""
     user_id = _get_user_id()
     if not user_id:
-        logger.error("Could not identify SoundCloud user. Is Chrome logged into SoundCloud?")
         return []
 
     data = _api_get(f"users/{user_id}/playlists", {"limit": 50, "representation": "full"})

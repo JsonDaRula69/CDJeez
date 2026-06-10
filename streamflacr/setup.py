@@ -1,7 +1,7 @@
 """Interactive setup wizard for StreamFLACr.
 
 Detects existing SoundCloud login and Soulseek installation,
-prompts for anything missing, writes .env, installs serato-tools,
+prompts for anything missing, writes .env,
 and registers the launchd daemon.
 """
 
@@ -45,45 +45,7 @@ def kill_running_daemon() -> bool:
     return killed
 
 
-def _get_package_python() -> str:
-    return sys.executable
-
-
 # ── Serato tools installation ─────────────────────────────────────────
-
-def install_serato_tools() -> bool:
-    """Install serato-tools with --no-deps into the current environment."""
-    print("  Installing serato-tools (Serato crate support)...")
-    python = _get_package_python()
-
-    result = subprocess.run(
-        ["uv", "pip", "install", "--python", python, "serato-tools", "--no-deps"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        print("  ✓ serato-tools installed")
-        return True
-
-    result = subprocess.run(
-        [python, "-m", "pip", "install", "serato-tools", "--no-deps"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        print("  ✓ serato-tools installed")
-        return True
-
-    print("  Warning: could not install serato-tools. Smart crate creation will be skipped.")
-    print(f"  Install manually: {python} -m pip install serato-tools --no-deps")
-    return False
-
-
-def check_serato_tools() -> bool:
-    try:
-        import serato_tools  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
 
 # ── SoundCloud detection ──────────────────────────────────────────────
 
@@ -259,7 +221,6 @@ def full_uninstall() -> None:
     uninstall — that data is too sensitive. Smart crates created by
     StreamFLACr remain in place for the user to manage manually.
     """
-    from .serato_crate import BACKUP_DIR
     print()
     print("  Uninstalling StreamFLACr...")
     print()
@@ -298,14 +259,7 @@ def full_uninstall() -> None:
     else:
         print("  - No log files found")
 
-    # 5. Remove Serato backup directory (our own backups, not Serato data)
-    if BACKUP_DIR.exists():
-        shutil.rmtree(BACKUP_DIR)
-        print(f"  ✓ Removed backup directory: {BACKUP_DIR}")
-    else:
-        print("  - No backup directory found")
-
-    # 6. Remove the uv/pipx tool installation
+    # 5. Remove the uv/pipx tool installation
     uninstalled_tool = False
     result = subprocess.run(
         ["uv", "tool", "uninstall", "streamflacr"],
@@ -334,6 +288,7 @@ def full_uninstall() -> None:
     print("  The following were NOT removed (Serato data is sensitive):")
     print(f"    Smart crates: {SERATO_DIR / 'SmartCrates'}")
     print(f"    Downloaded files: {DOWNLOAD_DIR}")
+    print(f"    Serato backups: /Users/djtchill/Music/_Serato_Backup_SFr")
     print("  ───────────────────────────────────────────")
     print()
 
@@ -348,7 +303,7 @@ def run_setup() -> None:
     print()
 
     # ── Step 1: SoundCloud ──
-    print("  [1/4] Checking SoundCloud login...")
+    print("  [1/3] Checking SoundCloud login...")
     sc_logged_in = detect_soundcloud_login()
     user_url = None
     if sc_logged_in:
@@ -374,7 +329,7 @@ def run_setup() -> None:
             user_url = input("  SoundCloud profile URL: ").strip()
 
     # ── Step 2: Soulseek ──
-    print("\n  [2/4] Checking Soulseek...")
+    print("\n  [2/3] Checking Soulseek...")
     slsk_installed = detect_soulseek_installation()
     slsk_has_data = detect_soulseek_data()
     if slsk_installed:
@@ -392,16 +347,8 @@ def run_setup() -> None:
         print("  Note: No SoulseekQt login data found.")
     slsk_creds = prompt_soulseek_setup()
 
-    # ── Step 3: Serato integration ──
-    print("\n  [3/4] Serato integration...")
-    has_serato = check_serato_tools()
-    if has_serato:
-        print("  ✓ serato-tools already installed")
-    else:
-        install_serato_tools()
-
-    # ── Step 4: Write config + register daemon ──
-    print("\n  [4/4] Finishing up...")
+    # ── Step 3: Write config + register daemon ──
+    print("\n  [3/3] Finishing up...")
     write_env_file(slsk_creds, user_url)
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     print(f"  ✓ Download directory: {DOWNLOAD_DIR}")

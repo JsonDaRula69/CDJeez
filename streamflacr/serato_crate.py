@@ -60,24 +60,13 @@ def backup_serato_changes(*paths: Path) -> None:
     logger.info("Backed up %d file(s) to %s", len(existing), backup_dest.name)
 
 
-def _import_serato_tools():
-    """Lazy import serato-tools. Raises ImportError if not installed."""
-    from serato_tools.smart_crate import SmartCrate  # noqa: F401
-    return SmartCrate
-
-
 def ensure_smart_crate(playlist_name: str) -> Path | None:
     """Create or update a Serato smart crate that matches on Label IS playlist_name.
 
     Backs up the file before any modification. Never deletes existing crates.
-    Returns the path to the .scrate file, or None if serato-tools is not installed.
+    Returns the path to the .scrate file.
     """
-    try:
-        SmartCrate = _import_serato_tools()
-    except ImportError:
-        logger.warning("serato-tools not installed; skipping smart crate creation")
-        logger.warning("Install with: pip install serato-tools --no-deps")
-        return None
+    from serato_tools.smart_crate import SmartCrate
 
     safe_name = playlist_name.replace("/", "≫").replace("\\", "≫")
     smart_crates_dir = SERATO_DIR / "SmartCrates"
