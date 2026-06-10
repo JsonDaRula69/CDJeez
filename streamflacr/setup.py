@@ -21,17 +21,23 @@ INSTALLED_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.djtchill.strea
 
 
 def kill_running_daemon() -> bool:
-    """Kill any stale streamflacr process from a previous run.
+    """Kill any stale streamflacr daemon from a previous run.
 
-    Only targets Python processes running our package — avoids killing
-    the parent shell or the current process.
+    Unloads the LaunchAgent first (to prevent launchd from respawning it),
+    then kills any remaining Python processes.
     """
     import signal
+    # Unload LaunchAgent so launchd doesn't respawn the daemon
+    if INSTALLED_PLIST.exists():
+        subprocess.run(
+            ["launchctl", "unload", str(INSTALLED_PLIST)],
+            capture_output=True, check=False,
+        )
+
     my_pid = os.getpid()
     parent_pid = os.getppid()
     killed = False
     try:
-        # Find Python processes with "streamflacr" in their command line
         result = subprocess.run(
             ["pgrep", "-f", "python.*streamflacr"],
             capture_output=True, text=True, timeout=5,

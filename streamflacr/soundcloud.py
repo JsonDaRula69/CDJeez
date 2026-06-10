@@ -246,12 +246,18 @@ def _get_user_id() -> int | None:
     if data:
         return data.get("id")
 
-    # OAuth failed — try launching Chrome in background and retrying
+    # OAuth failed — try launching SoundCloud app (Chrome PWA) or Chrome to refresh session
     import subprocess
     import time
 
-    logger.info("OAuth auth failed; launching Chrome to refresh session")
-    subprocess.run(["open", "-gja", "Google Chrome"], capture_output=True, check=False)
+    # Try the SoundCloud Chrome app first (lighter, stays in background)
+    sc_app = Path.home() / "Applications" / "Chrome Apps.localized" / "SoundCloud.app"
+    if sc_app.exists():
+        logger.info("OAuth auth failed; launching SoundCloud app to refresh session")
+        subprocess.run(["open", "-gja", str(sc_app)], capture_output=True, check=False)
+    else:
+        logger.info("OAuth auth failed; launching Chrome to refresh session")
+        subprocess.run(["open", "-gja", "Google Chrome"], capture_output=True, check=False)
 
     for attempt in range(1, 4):
         wait = 60
