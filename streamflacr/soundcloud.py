@@ -1,0 +1,308 @@
+"""SoundCloud playlist discovery and monitoring.
+
+Uses yt-dlp with Chrome cookies to discover all user playlists (including
+private ones), and the SoundCloud API v2 with decrypted Chrome cookies
+to resolve playlist tracks.
+"""
+
+import logging
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import requests
+import yt_dlp
+
+logger = logging.getLogger(__name__)
+
+_cached_client_id: str | None = None
+_cached_cookies: dict | None = None
+_cached_oauth_token: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrackInfo:
+    """Minimal track metadata we need from SoundCloud."""
+    track_id: str
+    title: str
+    artist: str
+    url: str
+
+
+@dataclass
+class PlaylistInfo:
+    """A SoundCloud playlist/set with its tracks."""
+    playlist_id: str
+    title: str
+    url: str
+    tracks: list[TrackInfo] = field(default_factory=list)
+
+
+def _get_client_id() -> str:
+    """Fetch the SoundCloud API v2 client_id by scraping the homepage."""
+    global _cached_client_id
+    if _cached_client_id:
+        return _cached_client_id
+    resp = requests.get("https://soundcloud.com/", timeout=15)
+    scripts = re.findall(r'<script[^>]+src="([^"]+)"', resp.text)
+    for script_url in reversed(scripts):
+        script_resp = requests.get(script_url, timeout=15)
+        match = re.search(r'client_id\s*:\s*"([0-9a-zA-Z]{32})"', script_resp.text)
+        if match:
+            _cached_client_id = match.group(1)
+            return _cached_client_id
+    raise RuntimeError("Could not extract SoundCloud client_id")
+
+
+def _decrypt_chrome_cookies() -> dict:
+    """Decrypt SoundCloud cookies from Chrome's cookie store."""
+    global _cached_cookies
+    if _cached_cookies is not None:
+        return _cached_cookies
+
+    import sqlite3
+    import subprocess
+
+    from Crypto.Cipher import AES
+    from Crypto.Hash import SHA1, HMAC
+    from Crypto.Protocol.KDF import PBKDF2
+    from Crypto.Util.Padding import unpad
+
+    chrome_dir = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+    cookie_db = None
+    for profile in ("Default", "Profile 1", "Profile 2", "Profile 3"):
+        candidate = chrome_dir / profile / "Cookies"
+        if candidate.exists():
+            cookie_db = candidate
+            break
+
+    if not cookie_db:
+        _cached_cookies = {}
+        return _cached_cookies
+
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Chrome Safe Storage", "-a", "Chrome", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            _cached_cookies = {}
+            return _cached_cookies
+        safe_key = result.stdout.strip()
+    except Exception:
+        _cached_cookies = {}
+        return _cached_cookies
+
+    key = PBKDF2(
+        safe_key.encode("utf-8"),
+        b"saltysalt",
+        dkLen=16,
+        count=1003,
+        prf=lambda p, s: HMAC.new(p, s, SHA1).digest(),
+    )
+
+    try:
+        conn = sqlite3.connect(str(cookie_db))
+        cur = conn.execute(
+            "SELECT name, host_key, encrypted_value FROM cookies WHERE host_key LIKE '%soundcloud%'"
+        )
+        cookies = {}
+        for name, host, enc_val in cur:
+            if enc_val[:3] != b"v10":
+                continue
+            encrypted = enc_val[3:]
+            cipher = AES.new(key, AES.MODE_CBC, b" " * 16)
+            decrypted = cipher.decrypt(encrypted)
+            try:
+                unpadded = unpad(decrypted, AES.block_size)
+            except ValueError:
+                unpadded = decrypted
+            text = unpadded.decode("utf-8", errors="replace")
+            clean = re.sub(r"[^\x20-\x7e]", "", text)
+            if clean and len(clean) < 500:
+                cookies[name] = clean
+        conn.close()
+    except Exception as e:
+        logger.debug("Chrome cookie extraction failed: %s", e)
+        _cached_cookies = {}
+        return _cached_cookies
+
+    _cached_cookies = cookies
+    return _cached_cookies
+
+
+def _get_oauth_token() -> str | None:
+    """Extract the SoundCloud OAuth token from Chrome cookies."""
+    global _cached_oauth_token
+    if _cached_oauth_token is not None:
+        return _cached_oauth_token
+    cookies = _decrypt_chrome_cookies()
+    raw = cookies.get("oauth_token", "")
+    if not raw:
+        _cached_oauth_token = ""
+        return None
+    match = re.search(r"(\d+-\d+-\d+-[A-Za-z0-9]+)", raw)
+    _cached_oauth_token = match.group(1) if match else ""
+    return _cached_oauth_token or None
+
+
+def _api_session() -> requests.Session:
+    """Build a requests session with Chrome's SoundCloud cookies and OAuth header."""
+    session = requests.Session()
+    cookies = _decrypt_chrome_cookies()
+    for name, val in cookies.items():
+        session.cookies.set(name, val, domain=".soundcloud.com")
+    token = _get_oauth_token()
+    if token:
+        session.headers["Authorization"] = f"OAuth {token}"
+    return session
+
+
+def _api_get(endpoint: str, params: dict | None = None) -> dict | None:
+    """Make an authenticated SoundCloud API v2 request."""
+    client_id = _get_client_id()
+    params = dict(params or {})
+    params["client_id"] = client_id
+    session = _api_session()
+    try:
+        resp = session.get(f"https://api-v2.soundcloud.com/{endpoint}", params=params, timeout=15)
+    except requests.RequestException as e:
+        logger.debug("API request failed: %s", e)
+        return None
+    if resp.status_code == 200:
+        return resp.json()
+    logger.debug("SoundCloud API %s returned %d", endpoint, resp.status_code)
+    return None
+
+
+def _api_resolve(url: str) -> dict | None:
+    """Resolve a SoundCloud URL via the API with full cookie auth."""
+    return _api_get("resolve", {"url": url})
+
+
+def discover_user_playlists(user_sets_url: str | None = None) -> list[PlaylistInfo]:
+    """Discover all playlists for the authenticated SoundCloud user.
+
+    If user_sets_url is provided, use it directly (e.g. https://soundcloud.com/username/sets).
+    Otherwise, try to get the user's profile URL from /me and derive the /sets URL.
+    """
+    if not user_sets_url:
+        me = _api_get("me")
+        if me:
+            permalink = me.get("permalink_url", "")
+            if permalink:
+                user_sets_url = f"{permalink}/sets"
+        if not user_sets_url:
+            logger.error("Cannot determine SoundCloud user URL. Set SOUNDCLOUD_USER_URL in .env")
+            return []
+
+    logger.info("Discovering playlists from %s", user_sets_url)
+    playlists = _yt_dlp_discover_playlists(user_sets_url)
+    logger.info("Found %d playlists", len(playlists))
+    return playlists
+
+
+def _yt_dmp_opts() -> dict:
+    """Common yt-dlp options with Chrome cookie auth."""
+    return {
+        "quiet": True,
+        "no_warnings": True,
+        "cookiesfrombrowser": ("chrome",),
+        "ignoreerrors": True,  # skip DRM-protected and failed tracks
+    }
+
+
+def _yt_dlp_discover_playlists(sets_url: str) -> list[PlaylistInfo]:
+    """Use yt-dlp to list all playlists from the user's /sets page."""
+    ydl_opts = {**_yt_dmp_opts(), "extract_flat": True}
+    results = []
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            result = ydl.extract_info(sets_url, download=False)
+        except yt_dlp.utils.ExtractorError as e:
+            logger.error("yt-dlp failed to list playlists: %s", e)
+            return results
+
+    if not result or "entries" not in result:
+        return results
+
+    for entry in result["entries"]:
+        if not entry:
+            continue
+        url = entry.get("url", "")
+        title = entry.get("title", "?")
+        playlist_id = str(entry.get("id", ""))
+        if url:
+            results.append(PlaylistInfo(playlist_id=playlist_id, title=title, url=url))
+
+    return results
+
+
+def fetch_playlist_tracks(playlist_url: str) -> list[TrackInfo]:
+    """Fetch all tracks from a SoundCloud playlist/set URL.
+
+    Tries the API with full cookie auth first (faster, gets metadata directly),
+    then falls back to yt-dlp.
+    """
+    # Try the API with full cookie auth
+    data = _api_resolve(playlist_url)
+    if data and "tracks" in data:
+        tracks = []
+        for t in data["tracks"]:
+            title = t.get("title", "")
+            artist = t.get("user", {}).get("username", "")
+            track_id = str(t.get("id", ""))
+            permalink = t.get("permalink_url", "")
+            tracks.append(TrackInfo(track_id=track_id, title=title, artist=artist, url=permalink))
+        logger.info("API returned %d tracks for playlist '%s'", len(tracks), data.get("title", ""))
+        return tracks
+
+    # Fallback: yt-dlp
+    logger.info("Falling back to yt-dlp for playlist: %s", playlist_url)
+    return _yt_dlp_playlist_tracks(playlist_url)
+
+
+def _yt_dlp_playlist_tracks(playlist_url: str) -> list[TrackInfo]:
+    """Use yt-dlp to extract playlist track URLs and resolve each one."""
+    ydl_opts = {**_yt_dmp_opts(), "extract_flat": True}
+    urls: list[str] = []
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        result = ydl.extract_info(playlist_url, download=False)
+        if result and "entries" in result:
+            for entry in result["entries"]:
+                if entry and entry.get("url"):
+                    urls.append(entry["url"])
+
+    # Resolve each track URL for metadata
+    tracks: list[TrackInfo] = []
+    for url in urls:
+        info = _yt_dlp_track_info(url)
+        if info:
+            tracks.append(info)
+    return tracks
+
+
+def _yt_dlp_track_info(track_url: str) -> TrackInfo | None:
+    """Extract single track info via yt-dlp. Returns None for DRM/failure."""
+    ydl_opts = _yt_dmp_opts()
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(track_url, download=False)
+        except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
+            logger.warning("yt-dlp could not extract: %s", track_url)
+            return None
+    if not info:
+        return None
+    return TrackInfo(
+        track_id=str(info.get("id", "")),
+        title=info.get("track") or info.get("title", ""),
+        artist=info.get("uploader", ""),
+        url=track_url,
+    )
+
+
+def refresh_playlist_tracks(playlist: PlaylistInfo) -> PlaylistInfo:
+    """Re-fetch the track list for a playlist and return an updated copy."""
+    tracks = fetch_playlist_tracks(playlist.url)
+    playlist.tracks = tracks
+    return playlist
