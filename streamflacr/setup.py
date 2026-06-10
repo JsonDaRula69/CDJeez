@@ -21,27 +21,30 @@ INSTALLED_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.djtchill.strea
 
 
 def kill_running_daemon() -> bool:
-    """Kill any running streamflacr process (daemon or foreground).
+    """Kill any stale streamflacr process from a previous run.
 
-    Skips the current process to avoid suicide.
+    Only targets Python processes running our package — avoids killing
+    the parent shell or the current process.
     """
     import signal
     my_pid = os.getpid()
+    parent_pid = os.getppid()
     killed = False
     try:
+        # Find Python processes with "streamflacr" in their command line
         result = subprocess.run(
-            ["pgrep", "-f", "streamflacr"],
+            ["pgrep", "-f", "python.*streamflacr"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
             for pid_str in result.stdout.strip().split("\n"):
                 try:
                     pid = int(pid_str.strip())
-                    if pid == my_pid:
+                    if pid in (my_pid, parent_pid):
                         continue
                     os.kill(pid, signal.SIGTERM)
                     killed = True
-                except (ValueError, ProcessLookupError):
+                except (ValueError, ProcessLookupError, PermissionError):
                     pass
     except Exception:
         pass
