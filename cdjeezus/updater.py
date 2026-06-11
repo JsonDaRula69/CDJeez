@@ -17,6 +17,10 @@ from pathlib import Path
 from .config import CONFIG_DIR, STATE_FILE
 from .setup import kill_running_daemon, register_launchdaemon, INSTALLED_PLIST, ENV_FILE
 from .daemon import request_stop
+from .style import (
+    success, warning, error, info, separator, box, box_bottom, box_line,
+    step_header, c, BRIGHT_CYAN, BRIGHT_AMBER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +58,6 @@ def _migrate_state(state: dict) -> dict:
     version = state.get("version", 1)
 
     if version < 2:
-        # v1 -> v2: Add label_name field awareness
         for url, playlist in state.get("playlists", {}).items():
             for tid, info in playlist.get("downloaded", {}).items():
                 info.setdefault("local_path", "")
@@ -62,12 +65,10 @@ def _migrate_state(state: dict) -> dict:
         logger.info("Migrated state from v1 to v2")
 
     if version < 3:
-        # v2 -> v3: Add serato_blocked_transfer flag
         state.setdefault("serato_blocked_transfer", False)
         logger.info("Migrated state from v2 to v3")
 
     if version < 4:
-        # v3 -> v4: Add verification fields to downloaded entries
         for url, playlist in state.get("playlists", {}).items():
             for tid, info in playlist.get("downloaded", {}).items():
                 info.setdefault("verified", None)
@@ -76,7 +77,6 @@ def _migrate_state(state: dict) -> dict:
         logger.info("Migrated state from v3 to v4")
 
     if version < 5:
-        # v4 -> v5: Add library fingerprinting and upscale tracking
         state.setdefault("library_fingerprinted", False)
         state.setdefault("upscale_prompted", False)
         logger.info("Migrated state from v4 to v5")
@@ -86,15 +86,10 @@ def _migrate_state(state: dict) -> dict:
 
 
 def _migrate_env() -> None:
-    """Migrate .env config file: add missing keys with defaults.
-
-    When new config options are added, existing .env files won't have them.
-    This adds any missing keys without overwriting user values.
-    """
+    """Migrate .env config file: add missing keys with defaults."""
     if not ENV_FILE.exists():
         return
 
-    # Default values for all config keys (used when key is missing from .env)
     defaults = {
         "PRIMARY_DJ": "serato",
         "TWO_WAY_SYNC": "0",
@@ -119,7 +114,6 @@ def _migrate_env() -> None:
                 existing_keys.add(key)
             new_lines.append(line)
 
-        # Add missing defaults at the end
         for key, default in defaults.items():
             if key not in existing_keys:
                 new_lines.append(f"{key}={default}")
@@ -144,97 +138,47 @@ def _backup_config() -> Path:
     return backup_dir
 
 
+def auto_update_if_available() -> None:
+    """Check PyPI for new version. If found, flag for update and shut down.
 
-def check_for_update() -> str | None:
-    """Check PyPI for a newer version. Returns latest version string or None."""
+    Called from the daemon poll loop. Writes an `auto-update-pending` flag
+    and triggers graceful shutdown. The LaunchAgent relaunches the daemon,
+    which then runs `perform_pending_update()`.
+    """
     latest = _get_latest_version()
     if latest is None:
-        return None
+        return
+
     current = _get_installed_version()
     if latest != current:
-        logger.info("Update available: v%s → v%s", current, latest)
-        return latest
-    return None
-
-
-def auto_update_if_available() -> bool:
-    """Check for updates and signal the daemon to auto-update on next restart.
-
-    Called periodically by the daemon (on startup and every 4 hours).
-    Instead of upgrading in-process (which is fragile), this:
-      1. Checks PyPI for a newer version
-      2. If found, writes an update-pending flag with version info
-      3. Sends SIGUSR1 to trigger a graceful shutdown
-      4. The LaunchAgent relaunches the daemon, which detects the flag
-         and performs the upgrade before starting the main loop.
-
-    Returns True if an update was scheduled (daemon will exit).
-    Returns False if no update was needed or if the check failed.
-    """
-    latest = check_for_update()
-    if latest is None:
-        return False
-
-    current = _get_installed_version()
-    logger.info("Auto-update available: v%s → v%s", current, latest)
-
-    # Write update-pending flag so the next launch performs the upgrade
-    update_flag = CONFIG_DIR / "auto-update-pending"
-    try:
-        update_flag.write_text(f"{current}\n{latest}\n")
-        update_flag.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("Auto-update scheduled: daemon will upgrade on next launch")
-    except Exception as e:
-        logger.error("Auto-update: could not write update flag: %s", e)
-        return False
-
-    # Notify the user
-    from .notify import send_notification
-    send_notification("CDJeezus Update", f"Updating to v{latest}...")
-
-    return True
+        logger.info("New version available: v%s (current: v%s)", latest, current)
+        flag = CONFIG_DIR / "auto-update-pending"
+        flag.write_text(latest)
+        logger.info("Auto-update flagged. Daemon will update on next launch.")
 
 
 def perform_pending_update() -> bool:
-    """Check for and perform a pending auto-update.
+    """If an auto-update is pending, perform it now.
 
-    Called at startup before the main daemon loop begins. If an
-    auto-update-pending flag exists, this function:
-      1. Backs up config and state
-      2. Upgrades the package via uv/pip
-      3. Migrates data (state.json and .env)
-      4. Removes the flag
-      5. Returns True so the caller can re-import and restart
-
-    Returns True if an update was performed, False otherwise.
+    Returns True if an update was performed (caller should restart).
+    Called at daemon startup before the main loop begins.
     """
-    update_flag = CONFIG_DIR / "auto-update-pending"
-    if not update_flag.exists():
+    flag = CONFIG_DIR / "auto-update-pending"
+    if not flag.exists():
         return False
 
-    try:
-        versions = update_flag.read_text().strip().split("\n")
-        current = versions[0] if len(versions) > 0 else "unknown"
-        target = versions[1] if len(versions) > 1 else "unknown"
-    except Exception:
-        current = "unknown"
-        target = "unknown"
+    target_version = flag.read_text().strip()
+    flag.unlink(missing_ok=True)
+    logger.info("Performing pending auto-update to v%s", target_version)
 
-    logger.info("Performing pending auto-update: v%s → v%s", current, target)
+    current = _get_installed_version()
+    print(f"  {step_header(0, 6, f'Auto-updating v{current} -> v{target_version}...')}")
 
-    # Back up config and state
-    try:
-        _backup_config()
-    except Exception as e:
-        logger.error("Auto-update backup failed: %s", e)
-        # Continue anyway — we have the flag, better to try the upgrade
+    # Back up
+    backup_dir = _backup_config()
+    print(success(f"Config backed up"))
 
-    # Unload LaunchAgent during upgrade
-    for plist in (INSTALLED_PLIST,):
-        if plist.exists():
-            subprocess.run(["launchctl", "unload", str(plist)], capture_output=True, check=False)
-
-    # Upgrade package
+    # Upgrade
     try:
         result = subprocess.run(
             ["uv", "tool", "install", "cdjeezus", "--force", "--reinstall"],
@@ -246,50 +190,54 @@ def perform_pending_update() -> bool:
                 capture_output=True, text=True, timeout=120,
             )
         if result.returncode != 0:
-            logger.error("Auto-update upgrade failed: %s", result.stderr or result.stdout)
-            update_flag.unlink(missing_ok=True)
+            logger.error("Auto-update failed: %s", result.stderr or result.stdout)
+            # Restore from backup
+            for f in (ENV_FILE, STATE_FILE):
+                backup = backup_dir / f.name
+                if backup.exists():
+                    shutil.copy2(backup, f)
             return False
+        print(success("Package upgraded"))
     except subprocess.TimeoutExpired:
-        logger.error("Auto-update upgrade timed out")
-        update_flag.unlink(missing_ok=True)
+        logger.error("Auto-update timed out")
         return False
 
-    # Migrate data
+    # Migrate
     if STATE_FILE.exists():
         try:
             state = json.loads(STATE_FILE.read_text())
             state = _migrate_state(state)
             STATE_FILE.write_text(json.dumps(state, indent=2))
+            print(success("State migrated"))
         except Exception as e:
-            logger.warning("Auto-update state migration issue: %s", e)
+            logger.warning("State migration failed: %s", e)
 
     try:
         _migrate_env()
+        print(success("Config migrated"))
     except Exception as e:
-        logger.warning("Auto-update config migration issue: %s", e)
+        logger.warning("Config migration failed: %s", e)
 
-    # Remove flag
-    update_flag.unlink(missing_ok=True)
-
-    # Re-register LaunchAgent
+    # Regenerate LaunchAgent
     try:
         register_launchdaemon()
+        print(success("LaunchAgent regenerated"))
     except Exception as e:
-        logger.warning("Auto-update: could not re-register LaunchAgent: %s", e)
+        logger.warning("Could not regenerate LaunchAgent: %s", e)
 
-    logger.info("Auto-update complete: v%s → v%s", current, target)
-
-    from .notify import send_notification
-    send_notification("CDJeezus Updated", f"Updated to v{target}")
-
+    print(success(f"Updated to v{target_version}"))
     return True
 
 
-def run_update(check_only: bool = False) -> None:
-    """Main update entry point.
+def check_for_updates() -> str | None:
+    """Check PyPI for the latest version. Returns the version string or None."""
+    return _get_latest_version()
 
-    1. Check for latest version on PyPI
-    2. If check_only, just report and return
+
+def run_update(check_only: bool = False) -> None:
+    """Run the full update流程:
+    1. Check PyPI for latest version
+    2. Compare with current version
     3. Back up config and state
     4. Stop daemon gracefully
     5. Upgrade the package
@@ -300,49 +248,59 @@ def run_update(check_only: bool = False) -> None:
     latest = _get_latest_version()
 
     if latest is None:
-        print(f"  Could not check for updates. Current version: v{current}")
-        print("  Make sure you have internet connectivity and try again.")
+        print()
+        print(warning("Could not check for updates."))
+        print(info(f"  Current version: v{current}"))
+        print(info("  Make sure you have internet connectivity and try again."))
+        print()
         sys.exit(1)
 
-    print(f"  Current version: v{current}")
-    print(f"  Latest version:   v{latest}")
+    print()
+    print(box(f" CDJeezus Update ", width=46))
+    print(box_line(f"Current: v{current}", width=46))
+    print(box_line(f"Latest:    v{latest}", width=46))
+    print(box_bottom(width=46))
+    print()
 
     if current == latest:
-        print(f"  Already up to date!")
+        print(success("Already up to date!"))
+        print(info("  Your CDJs are still overpriced though."))
+        print()
         return
 
     if check_only:
-        print(f"  Update available: v{current} → v{latest}")
-        print(f"  Run 'cdjeezus update' to install.")
+        print(info(f"  Update available: v{current} -> v{latest}"))
+        print(info("  Run 'cdjeezus update' to install."))
+        print()
         return
 
-    print(f"  Updating CDJeezus v{current} → v{latest}...")
+    print(info(f"  Updating v{current} -> v{latest}..."))
     print()
 
     # Step 1: Back up config and state
-    print("  [1/6] Backing up config...")
+    print(step_header(1, 6, "Backing up config..."))
     backup_dir = _backup_config()
-    print(f"  ✓ Config backed up to {backup_dir}")
+    print(success(f"Config backed up to {backup_dir}"))
 
     # Step 2: Stop daemon gracefully
-    print("  [2/6] Stopping daemon...")
+    print(step_header(2, 6, "Stopping daemon..."))
     stopped = request_stop(timeout=60)
     if stopped:
-        print("  ✓ Daemon stopped gracefully")
+        print(success("Daemon stopped gracefully"))
     else:
-        print("  ⚠ Daemon did not respond to graceful stop, force-killing...")
+        print(warning("Daemon did not respond, force-killing..."))
         kill_running_daemon()
-        print("  ✓ Daemon force-stopped")
+        print(success("Daemon force-stopped"))
 
     # Step 3: Unload LaunchAgent
-    print("  [3/6] Unloading LaunchAgent...")
+    print(step_header(3, 6, "Unloading LaunchAgent..."))
     for plist in (INSTALLED_PLIST,):
         if plist.exists():
             subprocess.run(["launchctl", "unload", str(plist)], capture_output=True, check=False)
-    print("  ✓ LaunchAgent unloaded")
+    print(success("LaunchAgent unloaded"))
 
     # Step 4: Upgrade package
-    print("  [4/6] Upgrading package...")
+    print(step_header(4, 6, "Upgrading package..."))
     try:
         result = subprocess.run(
             ["uv", "tool", "install", "cdjeezus", "--force", "--reinstall"],
@@ -354,16 +312,18 @@ def run_update(check_only: bool = False) -> None:
                 capture_output=True, text=True, timeout=120,
             )
         if result.returncode != 0:
-            print(f"  ✗ Upgrade failed:\n{result.stderr or result.stdout}")
-            print("  Restoring from backup...")
+            print(error("Upgrade failed"))
+            print(info(f"  {result.stderr or result.stdout}"))
+            print(info("  Restoring from backup..."))
             for f in (ENV_FILE, STATE_FILE):
                 backup = backup_dir / f.name
                 if backup.exists():
                     shutil.copy2(backup, f)
             sys.exit(1)
-        print("  ✓ Package upgraded")
+        print(success("Package upgraded"))
     except subprocess.TimeoutExpired:
-        print("  ✗ Upgrade timed out. Restoring from backup...")
+        print(error("Upgrade timed out"))
+        print(info("  Restoring from backup..."))
         for f in (ENV_FILE, STATE_FILE):
             backup = backup_dir / f.name
             if backup.exists():
@@ -371,50 +331,47 @@ def run_update(check_only: bool = False) -> None:
         sys.exit(1)
 
     # Step 5: Migrate data
-    print("  [5/6] Migrating data...")
+    print(step_header(5, 6, "Migrating data..."))
     if STATE_FILE.exists():
         try:
             state = json.loads(STATE_FILE.read_text())
             state = _migrate_state(state)
             STATE_FILE.write_text(json.dumps(state, indent=2))
-            print("  ✓ State migrated")
+            print(success("State migrated"))
         except Exception as e:
             logger.warning("State migration failed: %s", e)
             backup_state = backup_dir / "state.json"
             if backup_state.exists():
                 shutil.copy2(backup_state, STATE_FILE)
-            print("  ⚠ State migration had issues, restored from backup")
+            print(warning("State migration had issues, restored from backup"))
 
-    # Migrate .env config: add missing keys with defaults
     try:
         _migrate_env()
-        print("  ✓ Config migrated")
+        print(success("Config migrated"))
     except Exception as e:
         logger.warning("Config migration failed: %s", e)
-        print("  ⚠ Config migration had issues (manual review recommended)")
+        print(warning("Config migration had issues (manual review recommended)"))
 
     # Step 6: Regenerate LaunchAgent plist and restart
-    print("  [6/6] Restarting daemon...")
-    # Always regenerate plist so it uses the current Python path
+    print(step_header(6, 6, "Restarting daemon..."))
     try:
         register_launchdaemon()
-        print("  ✓ LaunchAgent regenerated and loaded")
+        print(success("LaunchAgent regenerated and loaded"))
     except Exception as e:
         logger.warning("Could not regenerate LaunchAgent: %s", e)
-        # Fall back to just reloading if it exists
         if INSTALLED_PLIST.exists():
             subprocess.run(["launchctl", "load", str(INSTALLED_PLIST)], capture_output=True, check=False)
-            print("  ✓ LaunchAgent reloaded")
+            print(success("LaunchAgent reloaded"))
         else:
-            print("  ⚠ Could not register LaunchAgent. Run 'cdjeezus setup' to fix.")
+            print(warning("Could not register LaunchAgent. Run 'cdjeezus setup' to fix."))
 
     new_version = _get_installed_version()
     print()
-    print(f"  ───────────────────────────────────────────")
-    print(f"  Update complete! v{current} → v{new_version}")
-    print()
+    print(box(f" Update Complete! ", width=46))
+    print(box_line(f"v{current} -> v{new_version}", width=46))
     if new_version != latest:
-        print(f"  Note: installed v{new_version} differs from PyPI v{latest}")
-        print(f"  You may need to run 'cdjeezus update' again.")
-    print(f"  ───────────────────────────────────────────")
+        print(box_mid(width=46))
+        print(box_line(f"Installed v{new_version} != PyPI v{latest}", width=46))
+        print(box_line("You may need to run update again.", width=46))
+    print(box_bottom(width=46))
     print()

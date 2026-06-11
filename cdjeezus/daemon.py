@@ -6,6 +6,7 @@ import signal
 import time
 
 from .config import PID_FILE, STOP_FILE, LOG_FILE
+from .style import info, dim, c, BRIGHT_CYAN
 
 logger = logging.getLogger(__name__)
 
@@ -132,12 +133,12 @@ def tail_log() -> None:
     Blocks until the user presses Ctrl+C.
     """
     if not LOG_FILE.exists():
-        print("  No log file found. Is the daemon running?")
+        print(info("  No log file found. Is the daemon running?"))
         return
 
     import subprocess
-    print(f"  Showing live output (Ctrl+C to detach):\n")
+    print(f"  {c(BRIGHT_CYAN, 'Showing live output')} {dim('(Ctrl+C to detach)')}\n")
     try:
         subprocess.run(["tail", "-f", str(LOG_FILE)], check=False)
     except KeyboardInterrupt:
-        print("\n  Detached.")
+        print(dim("\n  Detached."))

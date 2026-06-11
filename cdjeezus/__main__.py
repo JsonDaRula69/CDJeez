@@ -50,6 +50,7 @@ from .soundcloud import (
 )
 from .soulseek import SoulseekDownloader
 from .state import StateManager
+from .style import dim
 
 logger = logging.getLogger("cdjeezus")
 
@@ -510,7 +511,7 @@ async def amain(daemon: bool = False) -> None:
             remove_pid()
             clear_stop_flag()
 
-    print("\n  Stopped.")
+    print(dim("\n  Stopped."))
 
 
 if __name__ == "__main__":

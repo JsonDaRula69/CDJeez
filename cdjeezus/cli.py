@@ -1,4 +1,7 @@
-"""CLI entry point for CDJeezus."""
+"""CLI entry point for CDJeezus.
+
+Where your SoundCloud sins meet their Soulseek salvation.
+"""
 
 import argparse
 import asyncio
@@ -7,6 +10,12 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 from .config import LOG_FILE, PID_FILE
+from .style import (
+    format_banner, success, error, dim, accent, separator, info, header,
+    box, box_bottom, box_line, c,
+    BRIGHT_CYAN, BRIGHT_AMBER, BRIGHT_GREEN, BRIGHT_RED,
+    play_intro_rant,
+)
 
 
 def _setup_logging(verbose: bool, daemon: bool = False) -> None:
@@ -36,7 +45,6 @@ def _setup_logging(verbose: bool, daemon: bool = False) -> None:
         file_handler.setFormatter(logging.Formatter(fmt, datefmt))
         root.addHandler(file_handler)
     except OSError as e:
-        # If we can't write to the log file, just use console
         logging.warning("Could not set up file logging: %s", e)
 
     # Quiet aioslsk internals
@@ -52,7 +60,7 @@ def _setup_logging(verbose: bool, daemon: bool = False) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="cdjeezus",
-        description="CDJeezus - Auto-download FLAC from Soulseek for SoundCloud playlist additions",
+        description="CDJeezus — SoundCloud > Soulseek > Serato/Rekordbox pipeline",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -63,7 +71,7 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Force start even if another instance is running")
 
     # setup subcommand
-    setup_parser = subparsers.add_parser("setup", help="Run interactive setup wizard")
+    setup_parser = subparsers.add_parser("setup", help="Run the setup wizard")
     setup_parser.add_argument("--non-interactive", action="store_true",
                               help="Non-interactive setup: use env vars or defaults for all prompts")
 
@@ -72,7 +80,7 @@ def main() -> None:
     update_parser.add_argument("--check", action="store_true", help="Check for updates without installing")
 
     # uninstall subcommand
-    subparsers.add_parser("uninstall", help="Remove all CDJeezus artifacts (safe for Serato)")
+    subparsers.add_parser("uninstall", help="Remove CDJeezus (safe for your library)")
 
     # stop subcommand
     subparsers.add_parser("stop", help="Gracefully stop the running daemon")
@@ -85,19 +93,22 @@ def main() -> None:
     from . import __version__
 
     if args.version:
-        print(f"CDJeezus v{__version__}")
+        print(format_banner(__version__))
         return
 
     # ── stop command ──────────────────────────────────────────────────
     if args.command == "stop":
         from .daemon import request_stop
-        print(f"  CDJeezus v{__version__}")
-        print("  Stopping daemon...")
+        print()
+        print(box(f" CDJeezus v{__version__} ", width=46))
+        print(box_line("Telling the daemon to wrap it up...", width=46))
+        print(box_bottom(width=46))
         stopped = request_stop(timeout=120)
         if stopped:
-            print("  ✓ CDJeezus stopped.")
+            print(success("CDJeezus stopped. Go touch some real vinyl."))
         else:
-            print("  ✗ Daemon did not stop within timeout. Try again or use `cdjeezus stop`.")
+            print(error("Daemon didn't stop in time. Try again or use `cdjeezus stop`."))
+        print()
         return
 
     # ── log command ────────────────────────────────────────────────────
@@ -122,26 +133,24 @@ def main() -> None:
 
     # ── uninstall command ──────────────────────────────────────────────
     if args.command == "uninstall":
-        print(f"  CDJeezus v{__version__}")
         from .setup import full_uninstall
         full_uninstall()
         return
 
     # ── default run (one-shot or daemon) ───────────────────────────────
-    print(f"CDJeezus v{__version__}")
+    print(format_banner(__version__))
 
     from .daemon import is_running, tail_log
 
     # Check if another instance is already running
     existing_pid = is_running()
     if existing_pid and not args.force:
-        print(f"  CDJeezus is already running (PID {existing_pid})")
-        print(f"  Showing live output (Ctrl+C to detach):\n")
+        print(f"  {accent('CDJeezus is already running')} (PID {existing_pid})")
+        print(info("  Showing live output (Ctrl+C to detach):\n"))
         tail_log()
         return
 
-    # Kill any stale daemon process (but not the one we just checked above,
-    # which shouldn't exist at this point unless --force was used)
+    # Kill any stale daemon process
     from .setup import kill_running_daemon, INSTALLED_PLIST
     kill_running_daemon()
 
@@ -157,7 +166,14 @@ def main() -> None:
     from .config import is_configured
 
     if not is_configured():
-        print(f"  Welcome to CDJeezus v{__version__}! Let's get you set up.")
+        print()
+        print(format_banner(__version__))
+        print()
+        play_intro_rant()
+        print(separator())
+        print(f'  {header("Alright, let's get you set up.")}')
+        print(separator())
+        print()
         from .setup import run_setup
         run_setup(non_interactive=False)
         # Reload config module so module-level vars pick up the new .env
@@ -165,7 +181,7 @@ def main() -> None:
         from . import config as _cfg
         importlib.reload(_cfg)
         if not _cfg.is_configured():
-            print("\n  Setup incomplete. Run `cdjeezus setup` to try again.\n")
+            print(f"\n  {error("Setup didn't complete.")} Run `cdjeezus setup` when you're ready.\n")
             sys.exit(1)
 
     from .__main__ import amain
