@@ -268,9 +268,9 @@ def full_uninstall() -> None:
     from . import __version__
 
     print()
-    print(box(f" CDJeezus v{__version__} — Uninstall ", width=46))
-    print(box_line("Time to cleanse the temple.", width=46))
-    print(box_bottom(width=46))
+    print(box(f" CDJeezus v{__version__} — Uninstall ", width=54))
+    print(box_line("Time to cleanse the temple.", width=54))
+    print(box_bottom(width=54))
     print()
 
     # Stop daemon
@@ -315,10 +315,10 @@ def full_uninstall() -> None:
             f.unlink(missing_ok=True)
 
     print()
-    print(separator(width=46))
+    print(separator(width=54))
     print(info("  Music files, DJ libraries, and backups were NOT modified."))
     print(info("  As it should be. We're not monsters."))
-    print(separator(width=46))
+    print(separator(width=54))
     print()
 
 
@@ -331,9 +331,9 @@ def run_setup(*, non_interactive: bool = False) -> None:
     config: dict = {}
 
     print()
-    print(box(" CDJeezus Setup Wizard ", width=46))
-    print(box_line(f"v{__version__} — 8 steps to DJ salvation", width=46))
-    print(box_bottom(width=46))
+    print(box(" CDJeezus Setup Wizard ", width=54))
+    print(box_line(f"v{__version__} — 8 steps to DJ salvation", width=54))
+    print(box_bottom(width=54))
     print()
 
     # Migrate from StreamFLACr if needed
@@ -577,7 +577,7 @@ def run_setup(*, non_interactive: bool = False) -> None:
             ("Playlists", config.get("playlist_mode", "all").title()),
             ("Backups", "Yes" if config.get("backup_enabled") else "No"),
         ]
-        print(format_kv_box(" Config Summary ", summary_pairs, width=46))
+        print(format_kv_box(" Config Summary ", summary_pairs, width=54))
         print()
 
         if not non_interactive:
@@ -611,17 +611,17 @@ def run_setup(*, non_interactive: bool = False) -> None:
 
     # ── Disclaimer ──
     print()
-    print(box(" Legal Disclaimer (yeah, I know) ", width=46))
-    print(box_line("Alright, real talk: you're only supposed to", width=46))
-    print(box_line("use this for music you have rights to, on a", width=46))
-    print(box_line("private SoulSeek server that also belongs to", width=46))
-    print(box_line("you. This is for backup and syncing only.", width=46))
-    print(box_mid(width=46))
-    print(box_line("Also SoundCloud might get pissy if you don't", width=46))
-    print(box_line("have Artist Pro, so use at your own risk.", width=46))
-    print(box_line("I worked around it but idk ask Naveen to", width=46))
-    print(box_line("do better.", width=46))
-    print(box_bottom(width=46))
+    print(box(" Legal Disclaimer (yeah, I know) ", width=54))
+    print(box_line("Alright, real talk: you're only supposed to", width=54))
+    print(box_line("use this for music you have rights to, on a", width=54))
+    print(box_line("private SoulSeek server that also belongs to", width=54))
+    print(box_line("you. This is for backup and syncing only.", width=54))
+    print(box_mid(width=54))
+    print(box_line("Also SoundCloud might get pissy if you don't", width=54))
+    print(box_line("have Artist Pro, so use at your own risk.", width=54))
+    print(box_line("I worked around it but idk ask Naveen to", width=54))
+    print(box_line("do better.", width=54))
+    print(box_bottom(width=54))
     print()
 
     if not non_interactive:
@@ -632,11 +632,11 @@ def run_setup(*, non_interactive: bool = False) -> None:
         )
         if disclaimer_choice == 1:
             print()
-            print(box("", width=46))
-            print(box_line("lol. fuck off. Closing this window will", width=46))
-            print(box_line("uninstall automatically. Or press Enter to", width=46))
-            print(box_line("stay and accept your fate.", width=46))
-            print(box_bottom(width=46))
+            print(box("", width=54))
+            print(box_line("lol. fuck off. Closing this window will", width=54))
+            print(box_line("uninstall automatically. Or press Enter to", width=54))
+            print(box_line("stay and accept your fate.", width=54))
+            print(box_bottom(width=54))
             input()
     print()
 
@@ -675,9 +675,9 @@ def run_setup(*, non_interactive: bool = False) -> None:
         register_launchdaemon()
 
     print()
-    print(box(" Setup Complete! ", width=46))
-    print(box_line("Deploying the daemon in 3...", width=46))
-    print(box_bottom(width=46))
+    print(box(" Setup Complete! ", width=54))
+    print(box_line("Deploying the daemon in 3...", width=54))
+    print(box_bottom(width=54))
 
     import time
     time.sleep(3)

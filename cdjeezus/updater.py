@@ -256,10 +256,10 @@ def run_update(check_only: bool = False) -> None:
         sys.exit(1)
 
     print()
-    print(box(f" CDJeezus Update ", width=46))
-    print(box_line(f"Current: v{current}", width=46))
-    print(box_line(f"Latest:    v{latest}", width=46))
-    print(box_bottom(width=46))
+    print(box(f" CDJeezus Update ", width=54))
+    print(box_line(f"Current: v{current}", width=54))
+    print(box_line(f"Latest:    v{latest}", width=54))
+    print(box_bottom(width=54))
     print()
 
     if current == latest:
@@ -367,11 +367,11 @@ def run_update(check_only: bool = False) -> None:
 
     new_version = _get_installed_version()
     print()
-    print(box(f" Update Complete! ", width=46))
-    print(box_line(f"v{current} -> v{new_version}", width=46))
+    print(box(f" Update Complete! ", width=54))
+    print(box_line(f"v{current} -> v{new_version}", width=54))
     if new_version != latest:
-        print(box_mid(width=46))
-        print(box_line(f"Installed v{new_version} != PyPI v{latest}", width=46))
-        print(box_line("You may need to run update again.", width=46))
-    print(box_bottom(width=46))
+        print(box_mid(width=54))
+        print(box_line(f"Installed v{new_version} != PyPI v{latest}", width=54))
+        print(box_line("You may need to run update again.", width=54))
+    print(box_bottom(width=54))
     print()

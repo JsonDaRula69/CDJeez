@@ -100,9 +100,9 @@ def main() -> None:
     if args.command == "stop":
         from .daemon import request_stop
         print()
-        print(box(f" CDJeezus v{__version__} ", width=46))
-        print(box_line("Telling the daemon to wrap it up...", width=46))
-        print(box_bottom(width=46))
+        print(box(f" CDJeezus v{__version__} ", width=54))
+        print(box_line("Telling the daemon to wrap it up...", width=54))
+        print(box_bottom(width=54))
         stopped = request_stop(timeout=120)
         if stopped:
             print(success("CDJeezus stopped. Go touch some real vinyl."))
