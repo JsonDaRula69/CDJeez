@@ -1,11 +1,11 @@
 # CDJeezus — Project Knowledge Base
 
-**Last updated:** v0.27.0
-**Stack:** Python 3.11+, macOS, aioslsk, mutagen, serato-tools, pydantic-settings
+**Last updated:** v0.28.0
+**Stack:** Python 3.11+, macOS, aioslsk, mutagen, serato-tools, pydantic-settings, simple-term-menu
 
 ## Overview
 
-CDJeezus monitors SoundCloud playlists for new tracks, searches Soulseek for FLAC versions (falling back to 320kbps MP3), downloads them, tags metadata, and creates matching Serato smart crates. macOS-only (uses Chrome cookie decryption, osascript notifications, launchd).
+CDJeezus monitors SoundCloud playlists for new tracks, searches Soulseek for FLAC versions (falling back to 320kbps MP3), downloads them, tags metadata, and creates matching Serato smart crates. macOS-primary (uses Chrome cookie decryption, osascript notifications, launchd). Windows support planned but not yet implemented.
 
 ## Structure
 
@@ -16,19 +16,20 @@ cdjeezus/
 ├── cli.py               # Argparse entry point, logging config, instance detection, stop/log commands
 ├── config.py            # Env-based config via .env in ~/.config/cdjeezus/
 ├── daemon.py            # PID tracking, stop signaling (SIGUSR1 + flag file), single-instance, log tailing
+├── style.py             # ANSI colors, box-drawing, banner, intro rant, progress bar, spinner, countdown
 ├── fingerprint.py       # Audio fingerprinting via chromaprint/AcoustID for download verification
 ├── backup.py            # Library backup system (zip Serato/Rekordbox metadata to ~/Music/LibraryBackups)
 ├── library_scan.py      # Local library scanning and AcoustID fingerprint assignment
 ├── soundcloud.py        # API v2 with dual-attempt auth (OAuth first, client_id fallback)
-├── soulseek.py           # Search/download via aioslsk; graceful port conflict handling
-├── match.py              # Fuzzy matching: filename parsing, version descriptors, scoring
-├── metadata.py           # FLAC (Vorbis) + MP3 (ID3v2) tagging; verify + enrich from SC data
-├── serato_crate.py       # Smart crate: Comment IS <playlist_name> rule
-├── serato_watch.py       # Detect Serato running; flush staging → Auto Import on exit
-├── notify.py             # macOS notifications via osascript
-├── setup.py              # Interactive setup wizard (8 steps), full_uninstall(), LaunchDaemon management
-├── state.py              # JSON state file tracking seen tracks, download history, verification status
-└── updater.py             # Self-update: check PyPI, auto-update daemon, migrate data, CLI update command
+├── soulseek.py          # Search/download via aioslsk; graceful port conflict handling
+├── match.py             # Fuzzy matching: filename parsing, version descriptors, scoring
+├── metadata.py          # FLAC (Vorbis) + MP3 (ID3v2) tagging; verify + enrich from SC data
+├── serato_crate.py      # Smart crate: Comment IS <playlist_name> rule
+├── serato_watch.py      # Detect Serato running; flush staging → Auto Import on exit
+├── notify.py            # macOS notifications via osascript
+├── setup.py             # Interactive setup wizard (8 steps), full_uninstall(), LaunchDaemon management
+├── state.py             # JSON state file tracking seen tracks, download history, verification status
+└── updater.py           # Self-update: check PyPI, auto-update daemon, migrate data, CLI update command
 ```
 
 ## Where to Look
@@ -55,8 +56,23 @@ cdjeezus/
 | Change DJ software config | `config.py` | `PRIMARY_DJ`, `TWO_WAY_SYNC`, `REKORDBOX_DIR` |
 | Change playlist mode | `config.py` | `PLAYLIST_MODE`, `MONITORED_PLAYLISTS` |
 | Change auto-update interval | `config.py` | `AUTO_UPDATE_INTERVAL` (default 14400s = 4 hours) |
+| Change TUI style/colors | `style.py` | Constants, `c()`, `box()`, `step_header()`, menu cursor styles |
+| Change menu styling | `setup.py` | `_menu_select()`, `_multi_select()` — TerminalMenu kwargs |
 
 ## Architecture & Design Decisions
+
+### TUI Style System (v0.28.0+)
+- `style.py` is the single source of truth for all terminal styling
+- ANSI color constants (CYAN, BRIGHT_AMBER, etc.) with `c()` wrapper that respects `NO_COLOR`
+- Box-drawing characters (Unicode: ┌─┐│└─┘) with ASCII fallbacks when `NO_COLOR` is set
+- `box()`, `box_line()`, `box_bottom()`, `box_mid()`, `kv_line()` for framed output
+- `format_kv_box()` for config summaries, `step_header()` for wizard step labels
+- `separator()` for horizontal rules, `progress_bar()` for download progress
+- `spinner_frame()` for loading indicators, `countdown()` for retry timers
+- `simple-term-menu` customization: cyan cursor (▶), amber highlights, sarcastic status bar hints
+- Menu constants in `style.py`: `MENU_CURSOR`, `MENU_CURSOR_STYLE`, `MENU_HIGHLIGHT_STYLE`, etc.
+- Windows-compatible: `_IS_WINDOWS` checks, `_supports_ansi()` gate, NO_COLOR/TERM=dumb support
+- Default box width: 54 characters (fits most SoundCloud URLs)
 
 ### Auto-Update
 - Daemon checks PyPI for new versions on startup and every `AUTO_UPDATE_INTERVAL` seconds (default 4 hours)
@@ -67,61 +83,34 @@ cdjeezus/
 
 ### Graceful Shutdown (`cdjeezus stop`)
 - `cdjeezus stop` writes a `stop-requested` flag file and sends SIGUSR1 to the daemon PID
-- The daemon's SIGUSR1 handler sets an asyncio.Event (`_stop_event`) which wakes the poll loop
-- The poll loop and download processing check `should_stop()` between operations
-- On shutdown: completes in-progress downloads, applies metadata, flushes staging to Auto Import (unless Serato is running), notes pending transfers in state.json, disconnects from Soulseek, unloads LaunchAgent to prevent auto-restart
-- PID file at `~/.config/cdjeezus/cdjeezus.pid`
+- The daemon checks `should_stop()` between operations
+- `asyncio.wait_for(_stop_event.wait(), timeout=poll_interval)` so SIGUSR1 wakes it from sleep
+- Completes in-progress downloads, flushes staging if Serato is not running, runs post-session backup
 
-### Single-Instance Behavior
-- When `cdjeezus` is run and a daemon is already running, it tails the log file instead of starting a duplicate
-- `--force` flag overrides this and starts a new instance anyway
-- Log file at `~/.config/cdjeezus/cdjeezus.log` (rotating, 5MB, 3 backups)
+### Setup Wizard
+- 8-step interactive wizard with `simple-term-menu` for selection menus
+- Auto-detects Serato/Rekordbox, auto-selects when only one found
+- Sarcasm-flavored prompts and status bar hints on every menu
+- Config summary displayed in a `format_kv_box()` before confirmation
+- Legal disclaimer in a box frame with "Agreed" / "Wait, what?" options
+- "Wait, what?" shows dismissive message, closes CLI if window closed
 
-### SoundCloud Auth (dual-attempt)
-- `_api_get()` tries OAuth first (from Chrome cookies), then falls back to client_id
-- If OAuth fails, launches the SoundCloud PWA app (`~/Applications/Chrome Apps.localized/SoundCloud.app`) to refresh the session
-- Retries up to 3 times with 15/20/25 second delays between attempts
-- Never sends OAuth + client_id together (causes 403)
+### Uninstall
+- Zero-prompt. Never deletes music files, DJ libraries, or backups.
+- Only removes: config dir, staging dir, LaunchAgent plists, PID/log files
+- Styled with box frames and sarcastic parting messages
 
-### Backup System
-- **Library backups** (`backup.py`): Zip Serato/Rekordbox metadata (not audio) to `~/Music/LibraryBackups`. Runs before/after sessions and on DJ software exit. Max 10 backups.
-- **Scrate backups**: Removed separate backup system. Scrate files are covered by library backups.
-- **Uninstall**: Never removes backup directories. Only removes `~/.config/cdjeezus/`, staging, plist, and pid/log files.
+## Developer Workflow
 
-### Uninstaller (`cdjeezus uninstall`)
-- Single prompt: "Keep streaming source migration data? [Y/n]"
-- If yes: keeps `state.json` and `.env`, removes everything else in config dir
-- If no: removes entire config dir including state.json and .env
-- Always removes: LaunchAgent plist, pid file, log file, staging dir
-- Never removes: `~/Music/LibraryBackups/`, `~/Music/_Serato_/`, `~/Music/_Serato_/SmartCrates/`
-- Never removes: downloaded music files, Rekordbox library data
-
-### Setup Wizard (8 steps)
-1. Primary DJ software (auto-detected if only one found)
-2. 2-way sync with secondary DJ
-3. Soulseek credentials
-4. AcoustID API key
-5. SoundCloud login
-6. Playlist selection (TUI with arrow keys/spacebar/enter)
-7. Library backups
-8. Config summary with edit loop + disclaimer page
-
-### Installer/Updater/Uninstaller Maintenance
-- Whenever code changes modify `state.json` schema: add migration step in `updater.py` `_migrate_state()` and increment `CURRENT_STATE_VERSION`
-- Whenever new config keys are added: add defaults to `updater.py` `_migrate_env()` and `setup.py` `write_env_file()`
-- Whenever new CLI commands or flags are added: update `cli.py` argparse
-- Whenever uninstall behavior changes: update `full_uninstall()` — ensure Serato/Rekordbox data is never touched
-- Before every git commit: use `$omo:debugging` and `$omo:remove-ai-slops` tools
-
-## Release Process
-1. Bump version in `__init__.py` AND `pyproject.toml`
-2. Use `$omo:debugging` and `$omo:remove-ai-slops` skills before committing
-3. Commit with `v<version>` message
-4. Create feature branch, push, PR via `gh pr create`, merge with `--admin --squash`
-5. `gh release create v<version>`
-6. GitHub Actions publishes to PyPI via trusted publishing (OIDC)
-7. Verify: `python3 -c "import urllib.request, json; print(json.loads(urllib.request.urlopen('https://pypi.org/pypi/cdjeezus/json').read())['info']['version'])"`
-8. Clean install: `uv cache clean cdjeezus && uv tool install cdjeezus --force`
+1. Make code changes
+2. Use `$omo:debugging` tool before every git commit to ensure no code issues
+3. Use `$omo:remove-ai-slops` tool to clean up the code before every git commit
+4. When code changes modify `state.json` schema: add migration in `updater.py` and `state.py`
+5. When new config keys added: update `_migrate_env()` defaults and `write_env_file()` template in `setup.py`
+6. When new CLI flags added: update `cli.py` argparse and uninstall function if needed
+7. Build and publish: `python -m build && twine upload dist/*` (or use GitHub Actions)
+8. Update: `cdjeezus update` (handles daemon stop, upgrade, migration, restart)
+9. Clean install: `uv cache clean cdjeezus && uv tool install cdjeezus --force`
 
 ## Anti-Patterns (This Project)
 
@@ -135,6 +124,7 @@ cdjeezus/
 - **DO NOT** assume plist name is stable — handle both `com.djtchill.cdjeezus` (legacy) and `com.cdjeezus` (current)
 - **DO NOT** start a duplicate instance when one is already running — use `is_running()` from `daemon.py` and tail the log file instead
 - **DO NOT** delete or modify existing Serato crates or playlists without explicit permission and 3x confirmation
+- **DO NOT** add terminal styling outside of `style.py` — import from there for consistency
 
 ## Notes & Gotchas
 
@@ -161,3 +151,5 @@ cdjeezus/
 - **fpcalc/chromaprint**: Optional but recommended. Install via `brew install chromaprint`. Without it, only metadata-based verification is used.
 - **AcoustID**: Optional API key at https://acoustid.org/api-key. Enables ISRC-based definitive matching. Set `ACOUSTID_API_KEY` in `.env`.
 - **Auto-update**: Checks PyPI on startup and every 4 hours (configurable via `AUTO_UPDATE_INTERVAL`). Writes an `auto-update-pending` flag and triggers graceful shutdown. The next launch runs `perform_pending_update()` which upgrades the package, migrates data, and restarts.
+- **simple-term-menu**: Unix-only (requires `termios`). No Windows support. Menu styling constants in `style.py`.
+- **NO_COLOR**: All ANSI output respects `NO_COLOR` env var and `TERM=dumb`. Box-drawing falls back to ASCII.
