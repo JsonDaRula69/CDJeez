@@ -7,11 +7,16 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Audio files (never commit these)
 *.m4a
 *.mp3
 *.flac
 *.wav
-*.app/
+*.aiff
+*.aif
+*.aac
+*.ogg
 
 # Secrets & credentials
 .env.local
@@ -29,5 +34,3 @@ token.json
 
 # OS
 Thumbs.db
-*.m4a
-*.aiff
