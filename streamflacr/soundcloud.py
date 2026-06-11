@@ -355,11 +355,33 @@ def discover_user_playlists(user_sets_url: str | None = None) -> list[PlaylistIn
     """Discover all playlists for the authenticated user via API v2.
 
     Paginates through all playlists using linked_partitioning.
+    Retries up to 3 times if the API returns 0 playlists (transient auth issue).
     """
     user_id = _get_user_id()
     if not user_id:
         return []
 
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        all_playlists = _fetch_playlists_page(user_id)
+        if all_playlists:
+            logger.info("Discovered %d playlists for user %d", len(all_playlists), user_id)
+            return all_playlists
+        if attempt < max_retries:
+            wait = 5 * attempt
+            logger.warning("SoundCloud returned 0 playlists (attempt %d/%d); retrying in %ds", attempt, max_retries, wait)
+            time.sleep(wait)
+            # Clear cached auth so we re-read cookies
+            global _cached_oauth_token, _cached_cookies
+            _cached_oauth_token = None
+            _cached_cookies = None
+
+    logger.error("Could not discover any playlists after %d attempts", max_retries)
+    return []
+
+
+def _fetch_playlists_page(user_id: int) -> list[PlaylistInfo]:
+    """Fetch all playlists for a user via paginated API calls."""
     all_playlists: list[PlaylistInfo] = []
     url: str | None = f"https://api-v2.soundcloud.com/users/{user_id}/playlists?limit=50&representation=full"
 
@@ -392,7 +414,6 @@ def discover_user_playlists(user_sets_url: str | None = None) -> list[PlaylistIn
                 tracks = [t for t in (_track_from_api(x) for x in raw_tracks if isinstance(x, dict)) if t is not None]
             all_playlists.append(PlaylistInfo(playlist_id=pid, title=title, url=permalink, tracks=tracks))
 
-    logger.info("Discovered %d playlists for user %d", len(all_playlists), user_id)
     return all_playlists
 
 
