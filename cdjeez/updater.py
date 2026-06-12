@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 CURRENT_STATE_VERSION = 5
 
 
+def _version_gte(v1: str, v2: str) -> bool:
+    """Compare two version strings. Returns True if v1 >= v2."""
+    def _parse(v):
+        return tuple(int(x) for x in v.lstrip('v').split('.'))
+    try:
+        return _parse(v1) >= _parse(v2)
+    except (ValueError, TypeError):
+        return v1 >= v2
+
+
 def _get_installed_version() -> str:
     from . import __version__
     return __version__
@@ -186,7 +196,7 @@ def run_update(check_only: bool = False) -> None:
     boxed('CDJeez Update', f'Current: v{current}\nLatest:    v{latest}')
     console.print()
 
-    if current == latest:
+    if _version_gte(current, latest):
         ok("Already up to date!")
         dim("Your CDJs are still overpriced though.")
         console.print()
